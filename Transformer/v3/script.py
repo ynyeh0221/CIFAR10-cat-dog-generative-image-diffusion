@@ -406,15 +406,15 @@ def balanced_adaptive_loss(outputs, targets, noise_level, total_steps=1.0):
 
     sigmoid_progress = 1.0 / (1.0 + math.exp(-10 * (step_progress - 0.5)))
 
-    mse_weight = 0.4 - 0.1 * sigmoid_progress
+    mse_weight = 0.3 - 0.1 * sigmoid_progress
 
     l1_weight = 0.25 + 0.05 * sigmoid_progress
 
     cosine_weight = 0.2 - 0.05 * sigmoid_progress
 
-    high_freq_weight = 0.07 + 0.08 * sigmoid_progress
+    high_freq_weight = 0.12 + 0.08 * sigmoid_progress
 
-    edge_weight = 0.08 + 0.07 * sigmoid_progress
+    edge_weight = 0.13 + 0.07 * sigmoid_progress
 
     # Normalize weights
     total_weight = mse_weight + l1_weight + cosine_weight + high_freq_weight + edge_weight
