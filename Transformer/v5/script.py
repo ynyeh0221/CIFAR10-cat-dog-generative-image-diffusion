@@ -275,7 +275,7 @@ class CIFARUNetDenoiser(nn.Module):
     """
 
     def __init__(self, img_size=32, in_channels=3, num_classes=2, time_dim=256,
-                 attention_heads=8, attention_head_dim=240):
+                 attention_heads=8, attention_head_dim=80):
         super(CIFARUNetDenoiser, self).__init__()
 
         # Store important parameters
