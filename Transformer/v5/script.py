@@ -168,11 +168,42 @@ class Up(nn.Module):
 
 # Self-attention block (can be included in the U-Net architecture)
 class SelfAttention(nn.Module):
-    def __init__(self, channels):
+    """
+    Self-Attention module with configurable number of heads and dimension per head.
+    This module can be inserted into convolutional networks to capture global dependencies.
+
+    Args:
+        channels (int): Number of input channels
+        num_heads (int, optional): Number of attention heads. Default: 4
+        head_dim (int, optional): Dimension of each attention head. If None, uses channels/num_heads.
+                                 If specified, projection layers will be added to match dimensions.
+    """
+
+    def __init__(self, channels, num_heads=4, head_dim=None):
         super(SelfAttention, self).__init__()
         self.channels = channels
-        self.mha = nn.MultiheadAttention(channels, 4, batch_first=True)
-        self.ln = nn.LayerNorm([channels])
+        self.num_heads = num_heads
+
+        # If head_dim is specified, adjust internal dimensions
+        if head_dim is not None:
+            # Calculate total internal dimension to support head_dim per attention head
+            self.inner_dim = head_dim * num_heads
+            # Add projection layers to map channels to inner_dim
+            self.in_proj = nn.Linear(channels, self.inner_dim)
+            self.out_proj = nn.Linear(self.inner_dim, channels)
+            # Create multihead attention with the specified dimensions
+            self.mha = nn.MultiheadAttention(self.inner_dim, num_heads, batch_first=True)
+            self.ln = nn.LayerNorm([self.inner_dim])
+        else:
+            # Traditional approach: each head processes channels/num_heads dimensions
+            self.inner_dim = channels
+            self.mha = nn.MultiheadAttention(channels, num_heads, batch_first=True)
+            self.ln = nn.LayerNorm([channels])
+            # Use identity mappings as no projection is needed
+            self.in_proj = nn.Identity()
+            self.out_proj = nn.Identity()
+
+        # Feed-forward network for each position
         self.ff_self = nn.Sequential(
             nn.LayerNorm([channels]),
             nn.Linear(channels, channels),
@@ -180,35 +211,79 @@ class SelfAttention(nn.Module):
             nn.Linear(channels, channels),
         )
 
-        # For storing attention maps for visualization
+        # Store attention maps for visualization
         self.attention_maps = None
 
     def forward(self, x):
-        size = x.shape[-2:]
-        x = x.view(-1, self.channels, size[0] * size[1]).swapaxes(1, 2)
-        x_ln = self.ln(x)
+        """
+        Forward pass of the self-attention module.
 
+        Args:
+            x (torch.Tensor): Input tensor of shape [batch_size, channels, height, width]
+
+        Returns:
+            torch.Tensor: Output tensor with same shape as input
+        """
+        # Store original spatial dimensions
+        size = x.shape[-2:]
+
+        # Reshape features to sequence format: [batch, seq_len, channels]
+        # where seq_len = height * width (spatial locations)
+        x_seq = x.view(-1, self.channels, size[0] * size[1]).swapaxes(1, 2)
+
+        # Apply input projection if needed
+        x_proj = self.in_proj(x_seq)
+
+        # Apply layer normalization
+        x_ln = self.ln(x_proj)
+
+        # Apply multihead self-attention
+        # Query, key, and value are all the same for self-attention
         attention_value, attn_weights = self.mha(x_ln, x_ln, x_ln)
 
-        # Store attention maps for visualization
+        # Store attention maps for visualization (detached from computation graph)
         self.attention_maps = attn_weights.detach().clone()
 
-        attention_value = attention_value + x
-        attention_value = self.ff_self(attention_value) + attention_value
-        return attention_value.swapaxes(2, 1).view(-1, self.channels, size[0], size[1])
+        # Apply output projection and add residual connection
+        attention_value = self.out_proj(attention_value) + x_seq
 
+        # Apply feed-forward network with residual connection
+        attention_value = self.ff_self(attention_value) + attention_value
+
+        # Reshape back to feature map format: [batch, channels, height, width]
+        return attention_value.swapaxes(2, 1).view(-1, self.channels, size[0], size[1])
 
 # U-Net Model with time and class conditioning
 class CIFARUNetDenoiser(nn.Module):
-    def __init__(self, img_size=32, in_channels=3, num_classes=2, time_dim=256):
+    """
+    U-Net architecture for image denoising with self-attention, designed for CIFAR-10 dataset.
+    The model incorporates time and class conditioning for use in diffusion models.
+
+    Features:
+    - Encoder-decoder architecture with skip connections
+    - Self-attention at multiple levels for global context
+    - Time and class conditioning throughout the network
+    - Residual refinement module for output enhancement
+
+    Args:
+        img_size (int): Size of input image (assumed square)
+        in_channels (int): Number of input channels (3 for RGB)
+        num_classes (int): Number of classes for conditioning
+        time_dim (int): Dimensionality of time embedding
+        attention_heads (int): Number of attention heads in self-attention layers
+        attention_head_dim (int): Dimension per attention head
+    """
+
+    def __init__(self, img_size=32, in_channels=3, num_classes=2, time_dim=256,
+                 attention_heads=8, attention_head_dim=240):
         super(CIFARUNetDenoiser, self).__init__()
 
-        # Save important parameters
+        # Store important parameters
         self.img_size = img_size
         self.in_channels = in_channels
         self.time_dim = time_dim
 
-        # Time embedding
+        # Time embedding network: converts scalar timestep to time_dim vector
         self.time_mlp = nn.Sequential(
             nn.Linear(1, time_dim),
             nn.SiLU(),
@@ -217,40 +292,40 @@ class CIFARUNetDenoiser(nn.Module):
             nn.Linear(time_dim, time_dim)
         )
 
-        # Class embedding
+        # Class embedding: learns a vector for each class label
         self.class_embedding = nn.Embedding(num_classes, time_dim)
 
-        # Initial layer
+        # Initial convolutional layer
         self.init_conv = DoubleConv(in_channels, 64)
 
         # Encoder (downsampling path)
         self.down1 = Down(64, 128, emb_dim=time_dim)
-        self.sa1 = SelfAttention(128)
+        self.sa1 = SelfAttention(128, num_heads=attention_heads, head_dim=attention_head_dim)
         self.down2 = Down(128, 256, emb_dim=time_dim)
-        self.sa2 = SelfAttention(256)
+        self.sa2 = SelfAttention(256, num_heads=attention_heads, head_dim=attention_head_dim)
         self.down3 = Down(256, 256, emb_dim=time_dim)
-        self.sa3 = SelfAttention(256)
+        self.sa3 = SelfAttention(256, num_heads=attention_heads, head_dim=attention_head_dim)
 
-        # Bottleneck
+        # Bottleneck layers at the lowest resolution
         self.bottleneck1 = DoubleConv(256, 512)
         self.bottleneck2 = DoubleConv(512, 512)
         self.bottleneck3 = DoubleConv(512, 256)
 
         # Decoder (upsampling path)
-        self.up1 = Up(512, 128, emb_dim=time_dim)
-        self.sa4 = SelfAttention(128)
-        self.up2 = Up(256, 64, emb_dim=time_dim)
-        self.sa5 = SelfAttention(64)
-        self.up3 = Up(128, 64, emb_dim=time_dim)
-        self.sa6 = SelfAttention(64)
+        self.up1 = Up(512, 128, emb_dim=time_dim)  # Input: 256 (from bottleneck) + 256 (skip from down3)
+        self.sa4 = SelfAttention(128, num_heads=attention_heads, head_dim=attention_head_dim)
+        self.up2 = Up(256, 64, emb_dim=time_dim)  # Input: 128 (from up1) + 128 (skip from down2)
+        self.sa5 = SelfAttention(64, num_heads=attention_heads, head_dim=attention_head_dim)
+        self.up3 = Up(128, 64, emb_dim=time_dim)  # Input: 64 (from up2) + 64 (skip from down1)
+        self.sa6 = SelfAttention(64, num_heads=attention_heads, head_dim=attention_head_dim)
 
-        # Final output
+        # Final output convolution
         self.final_conv = nn.Sequential(
             DoubleConv(64, 64),
-            nn.Conv2d(64, in_channels, kernel_size=1)
+            nn.Conv2d(64, in_channels, kernel_size=1)  # 1x1 conv to map to RGB
         )
 
-        # Refinement module using ResBlocks (similar to original model)
+        # Refinement module using ResBlocks for enhanced details
         self.refinement = nn.Sequential(
             nn.Conv2d(self.in_channels, 64, kernel_size=3, padding=1),
             nn.ReLU(),
@@ -263,15 +338,26 @@ class CIFARUNetDenoiser(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
+        """Initialize model weights using Xavier initialization"""
         for m in self.modules():
             if isinstance(m, (nn.Conv2d, nn.Linear)):
                 torch.nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     torch.nn.init.zeros_(m.bias)
 
-    # In the CIFARUNetDenoiser class, replace the forward method with this:
     def forward(self, x, noise_level, labels):
-        # Process noise level - fix to handle scalar noise level
+        """
+        Forward pass of the U-Net model.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape [batch_size, in_channels, height, width]
+            noise_level (torch.Tensor): Noise level tensor (timestep in diffusion process)
+            labels (torch.Tensor): Class labels for conditioning
+
+        Returns:
+            torch.Tensor: Denoised output with same shape as input
+        """
+        # Process noise level - handle different formats
         batch_size = x.shape[0]
 
         # Handle different noise_level formats
@@ -302,39 +388,44 @@ class CIFARUNetDenoiser(nn.Module):
         combined_emb = t_emb + c_emb
 
         # Initial convolution
-        x1 = self.init_conv(x)
+        x1 = self.init_conv(x)  # [B, 64, H, W]
 
-        # Encoder
-        x2 = self.down1(x1, combined_emb)
+        # Encoder path with self-attention
+        x2 = self.down1(x1, combined_emb)  # [B, 128, H/2, W/2]
         x2 = self.sa1(x2)
-        x3 = self.down2(x2, combined_emb)
+        x3 = self.down2(x2, combined_emb)  # [B, 256, H/4, W/4]
         x3 = self.sa2(x3)
-        x4 = self.down3(x3, combined_emb)
+        x4 = self.down3(x3, combined_emb)  # [B, 256, H/8, W/8]
         x4 = self.sa3(x4)
 
         # Bottleneck
-        x4 = self.bottleneck1(x4)
-        x4 = self.bottleneck2(x4)
-        x4 = self.bottleneck3(x4)
+        x4 = self.bottleneck1(x4)  # [B, 512, H/8, W/8]
+        x4 = self.bottleneck2(x4)  # [B, 512, H/8, W/8]
+        x4 = self.bottleneck3(x4)  # [B, 256, H/8, W/8]
 
-        # Decoder with skip connections
-        x = self.up1(x4, x3, combined_emb)
+        # Decoder path with skip connections and self-attention
+        x = self.up1(x4, x3, combined_emb)  # [B, 128, H/4, W/4]
         x = self.sa4(x)
-        x = self.up2(x, x2, combined_emb)
+        x = self.up2(x, x2, combined_emb)  # [B, 64, H/2, W/2]
         x = self.sa5(x)
-        x = self.up3(x, x1, combined_emb)
+        x = self.up3(x, x1, combined_emb)  # [B, 64, H, W]
         x = self.sa6(x)
 
         # Final convolution
-        output = self.final_conv(x)
+        output = self.final_conv(x)  # [B, in_channels, H, W]
 
-        # Apply refinement with skip connection (as in original model)
+        # Apply refinement with residual connection
         refined_output = self.refinement(output) + output
 
         return refined_output
 
     def get_attention_maps(self):
-        # Collect attention maps from self-attention layers
+        """
+        Collect attention maps from all self-attention layers for visualization.
+
+        Returns:
+            list: List of attention maps from each self-attention layer
+        """
         attention_maps = []
         for module in [self.sa1, self.sa2, self.sa3, self.sa4, self.sa5, self.sa6]:
             if hasattr(module, 'attention_maps'):
