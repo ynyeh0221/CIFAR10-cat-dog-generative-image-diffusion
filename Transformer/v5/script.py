@@ -278,14 +278,7 @@ class Up(nn.Module):
 # Self-attention block (can be included in the U-Net architecture)
 class SelfAttention(nn.Module):
     """
-    Self-Attention module with configurable number of heads and dimension per head.
-    This module can be inserted into convolutional networks to capture global dependencies.
-
-    Args:
-        channels (int): Number of input channels
-        num_heads (int, optional): Number of attention heads. Default: 4
-        head_dim (int, optional): Dimension of each attention head. If None, uses channels/num_heads.
-                                 If specified, projection layers will be added to match dimensions.
+    Linear Attention module with O(n) complexity instead of O(n²)
     """
 
     def __init__(self, channels, num_heads=4, head_dim=None):
@@ -293,74 +286,72 @@ class SelfAttention(nn.Module):
         self.channels = channels
         self.num_heads = num_heads
 
-        # If head_dim is specified, adjust internal dimensions
+        # Use custom head_dim if provided, otherwise divide channels
         if head_dim is not None:
-            # Calculate total internal dimension to support head_dim per attention head
+            self.head_dim = head_dim
             self.inner_dim = head_dim * num_heads
-            # Add projection layers to map channels to inner_dim
-            self.in_proj = nn.Linear(channels, self.inner_dim)
-            self.out_proj = nn.Linear(self.inner_dim, channels)
-            # Create multihead attention with the specified dimensions
-            self.mha = nn.MultiheadAttention(self.inner_dim, num_heads, batch_first=True)
-            self.ln = nn.LayerNorm([self.inner_dim])
+            # Need projections to handle dimension change
+            self.in_proj = nn.Conv2d(channels, self.inner_dim, kernel_size=1)
+            self.out_proj = nn.Conv2d(self.inner_dim, channels, kernel_size=1)
         else:
-            # Traditional approach: each head processes channels/num_heads dimensions
+            self.head_dim = channels // num_heads
             self.inner_dim = channels
-            self.mha = nn.MultiheadAttention(channels, num_heads, batch_first=True)
-            self.ln = nn.LayerNorm([channels])
-            # Use identity mappings as no projection is needed
+            # No dimension change needed
             self.in_proj = nn.Identity()
-            self.out_proj = nn.Identity()
+            self.out_proj = nn.Conv2d(channels, channels, kernel_size=1)
 
-        # Feed-forward network for each position
-        self.ff_self = nn.Sequential(
-            nn.LayerNorm([channels]),
-            nn.Linear(channels, channels),
-            nn.GELU(),
-            nn.Linear(channels, channels),
-        )
+        # Projection layers for Q, K, V
+        self.query = nn.Conv2d(self.inner_dim, self.inner_dim, kernel_size=1)
+        self.key = nn.Conv2d(self.inner_dim, self.inner_dim, kernel_size=1)
+        self.value = nn.Conv2d(self.inner_dim, self.inner_dim, kernel_size=1)
 
-        # Store attention maps for visualization
+        # Normalization layers
+        self.norm = nn.GroupNorm(1, self.inner_dim)
+
+        # For storing attention maps
         self.attention_maps = None
 
     def forward(self, x):
         """
-        Forward pass of the self-attention module.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape [batch_size, channels, height, width]
-
-        Returns:
-            torch.Tensor: Output tensor with same shape as input
+        Forward pass using linear attention mechanism
         """
-        # Store original spatial dimensions
-        size = x.shape[-2:]
+        batch_size, c, h, w = x.shape
 
-        # Reshape features to sequence format: [batch, seq_len, channels]
-        # where seq_len = height * width (spatial locations)
-        x_seq = x.view(-1, self.channels, size[0] * size[1]).swapaxes(1, 2)
+        # Initial projection if dimensions differ
+        x = self.in_proj(x)
+        x = self.norm(x)
 
-        # Apply input projection if needed
-        x_proj = self.in_proj(x_seq)
+        # Apply projections
+        q = self.query(x)
+        k = self.key(x)
+        v = self.value(x)
 
-        # Apply layer normalization
-        x_ln = self.ln(x_proj)
+        # Reshape to multi-head format
+        q = q.view(batch_size, self.num_heads, self.head_dim, h * w)
+        k = k.view(batch_size, self.num_heads, self.head_dim, h * w)
+        v = v.view(batch_size, self.num_heads, self.head_dim, h * w)
 
-        # Apply multihead self-attention
-        # Query, key, and value are all the same for self-attention
-        attention_value, attn_weights = self.mha(x_ln, x_ln, x_ln)
+        # Apply feature map: elu(x) + 1 for positive values
+        q = F.elu(q) + 1.0
+        k = F.elu(k) + 1.0
 
-        # Store attention maps for visualization (detached from computation graph)
-        self.attention_maps = attn_weights.detach().clone()
+        # Linear attention computation
+        k_sum = k.sum(dim=-1, keepdim=True).clamp(min=1e-5)
+        k_normalized = k / k_sum
 
-        # Apply output projection and add residual connection
-        attention_value = self.out_proj(attention_value) + x_seq
+        # Compute context: (B, H, D, N) x (B, H, D, N) -> (B, H, D, D)
+        context = torch.matmul(v, k_normalized.transpose(-2, -1))
 
-        # Apply feed-forward network with residual connection
-        attention_value = self.ff_self(attention_value) + attention_value
+        # Compute output: (B, H, D, D) x (B, H, D, N) -> (B, H, D, N)
+        out = torch.matmul(context, q)
 
-        # Reshape back to feature map format: [batch, channels, height, width]
-        return attention_value.swapaxes(2, 1).view(-1, self.channels, size[0], size[1])
+        # Reshape back to original format
+        out = out.view(batch_size, self.inner_dim, h, w)
+
+        # Final projection back to original dimensions if needed
+        out = self.out_proj(out)
+
+        return out
 
 # U-Net Model with time and class conditioning
 class CIFARUNetDenoiser(nn.Module):
@@ -544,7 +535,8 @@ if __name__ == '__main__':
         in_channels=3,
         num_classes=2,  # Cat and dog
         time_dim=256,
-        patch_size=4
+        patch_size=4,
+        attention_head_dim=512
     ).to(device)
 
     # Use AdamW with weight decay for better regularization
@@ -724,12 +716,11 @@ if __name__ == '__main__':
 
             # Dynamic weighting with scaling
             # Adjust loss weights for better convergence
-            mse_weight = 0.55 - 0.2 * (epoch / epochs)  # Changed from 0.65 - 0.25
-            l1_weight = 0.3 - 0.1 * (epoch / epochs)  # Changed from 0.25 - 0.15
-            cos_sim_weight = 0.15 + 0.3 * (epoch / epochs)  # Changed from 0.1 + 0.4
+            mse_weight = 0.8 - 0.15 * (epoch / epochs)
+            l1_weight = 0.2 + 0.15 * (epoch / epochs)
 
             # Combined loss
-            loss = (mse_weight * mse) + (l1_weight * l1 * l1_factor) + (cos_sim_weight * cos_sim * cos_sim_factor)
+            loss = (mse_weight * mse) + (l1_weight * l1 * l1_factor)
 
             loss.backward()
 
@@ -915,10 +906,6 @@ if __name__ == '__main__':
                                                   size='large', rotation=0,
                                                   labelpad=40, va='center', ha='right')
 
-        plt.suptitle("Detailed Denoising Process", fontsize=16)
-        plt.subplots_adjust(left=0.1, wspace=0.05, hspace=0.1)
-        plt.tight_layout()
-        plt.savefig('detailed_denoising_process.png', dpi=300, bbox_inches='tight')
         plt.suptitle("Detailed Denoising Process", fontsize=16)
         plt.subplots_adjust(left=0.1, wspace=0.05, hspace=0.1)
         plt.tight_layout()
