@@ -87,38 +87,131 @@ class ResBlock(nn.Module):
         return out
 
 
-# U-Net double convolutional block
-class DoubleConv(nn.Module):
-    def __init__(self, in_channels, out_channels, mid_channels=None, residual=False):
-        super().__init__()
-        self.residual = residual
-        if not mid_channels:
-            mid_channels = out_channels
+# Create a new class for handling patches in convolutional layers
+class PatchConv(nn.Module):
+    def __init__(self, in_channels, out_channels, patch_size=2, stride=1, padding=0):
+        super(PatchConv, self).__init__()
+        self.patch_size = patch_size
 
-        self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False),
-            nn.GroupNorm(1, mid_channels),
-            nn.GELU(),
-            nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.GroupNorm(1, out_channels),
+        # Create a convolution that operates on patches
+        self.conv = nn.Conv2d(
+            in_channels * patch_size * patch_size,  # Input channels × patch area
+            out_channels,
+            kernel_size=1,  # 1x1 convolution on the flattened patches
+            stride=1,
+            padding=0
         )
 
     def forward(self, x):
-        if self.residual:
-            return F.gelu(x + self.double_conv(x))
-        else:
-            return F.gelu(self.double_conv(x))
+        batch_size, channels, height, width = x.shape
+
+        # Ensure dimensions are divisible by patch_size
+        if height % self.patch_size != 0 or width % self.patch_size != 0:
+            pad_h = self.patch_size - (height % self.patch_size)
+            pad_w = self.patch_size - (width % self.patch_size)
+            x = F.pad(x, (0, pad_w, 0, pad_h))
+            batch_size, channels, height, width = x.shape
+
+        # Reshape to extract patches
+        x = x.unfold(2, self.patch_size, self.patch_size).unfold(3, self.patch_size, self.patch_size)
+        x = x.contiguous().view(batch_size, channels, height // self.patch_size, width // self.patch_size,
+                                self.patch_size * self.patch_size)
+        x = x.permute(0, 1, 4, 2, 3).contiguous().view(batch_size, channels * self.patch_size * self.patch_size,
+                                                       height // self.patch_size, width // self.patch_size)
+
+        # Apply convolution to the flattened patches
+        x = self.conv(x)
+
+        return x
 
 
-# Down-sampling block
-class Down(nn.Module):
-    def __init__(self, in_channels, out_channels, emb_dim=256):
-        super().__init__()
-        self.maxpool_conv = nn.Sequential(
-            nn.MaxPool2d(2),
-            DoubleConv(in_channels, in_channels, residual=True),
-            DoubleConv(in_channels, out_channels),
+# Add a class for unpatchifying - the reverse operation of patching
+class PatchExpand(nn.Module):
+    def __init__(self, in_channels, out_channels, patch_size=2):
+        super(PatchExpand, self).__init__()
+        self.patch_size = patch_size
+
+        # Create a convolution to map patch features to pixel features
+        self.conv = nn.Conv2d(
+            in_channels,
+            out_channels * patch_size * patch_size,  # Output channels × patch area
+            kernel_size=1,
+            stride=1,
+            padding=0
         )
+
+    def forward(self, x):
+        batch_size, channels, height, width = x.shape
+
+        # Apply 1x1 convolution to expand features
+        x = self.conv(x)
+
+        # Reshape to expand spatial dimensions
+        channels_per_pixel = x.shape[1] // (self.patch_size * self.patch_size)
+        x = x.view(batch_size, channels_per_pixel, self.patch_size, self.patch_size, height, width)
+        x = x.permute(0, 1, 4, 2, 5, 3).contiguous()
+        x = x.view(batch_size, channels_per_pixel, height * self.patch_size, width * self.patch_size)
+
+        return x
+
+
+# Modify the DoubleConv class to use patch convolutions
+class DoubleConv(nn.Module):
+    def __init__(self, in_channels, out_channels, mid_channels=None, residual=False, patch_size=1):
+        super().__init__()
+        self.residual = residual
+        self.patch_size = patch_size
+
+        if not mid_channels:
+            mid_channels = out_channels
+
+        # First convolution using patches if patch_size > 1
+        if patch_size > 1:
+            self.conv1 = PatchConv(in_channels, mid_channels, patch_size=patch_size)
+        else:
+            self.conv1 = nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1, bias=False)
+
+        self.norm1 = nn.GroupNorm(1, mid_channels)
+        self.act1 = nn.GELU()
+
+        # Second convolution using normal 3x3 conv to maintain spatial information
+        self.conv2 = nn.Conv2d(mid_channels, out_channels, kernel_size=3, padding=1, bias=False)
+        self.norm2 = nn.GroupNorm(1, out_channels)
+
+    def forward(self, x):
+        # Apply the first patch-based convolution
+        out = self.conv1(x)
+        out = self.norm1(out)
+        out = self.act1(out)
+
+        # Apply the second standard convolution
+        out = self.conv2(out)
+        out = self.norm2(out)
+
+        if self.residual and x.shape == out.shape:
+            return F.gelu(x + out)
+        else:
+            return F.gelu(out)
+
+
+# Modify the Down class to incorporate patch convolutions
+class Down(nn.Module):
+    def __init__(self, in_channels, out_channels, emb_dim=256, patch_size=1):
+        super().__init__()
+
+        self.patch_size = patch_size
+
+        # Replace maxpool with patch-based downsampling
+        if patch_size > 1:
+            self.patch_down = PatchConv(in_channels, in_channels, patch_size=patch_size)
+            self.double_conv1 = DoubleConv(in_channels, in_channels, residual=True, patch_size=1)
+            self.double_conv2 = DoubleConv(in_channels, out_channels, patch_size=1)
+        else:
+            self.maxpool_conv = nn.Sequential(
+                nn.MaxPool2d(2),
+                DoubleConv(in_channels, in_channels, residual=True),
+                DoubleConv(in_channels, out_channels),
+            )
 
         # Time and class embedding projection
         self.emb_layer = nn.Sequential(
@@ -127,17 +220,31 @@ class Down(nn.Module):
         )
 
     def forward(self, x, t_emb):
-        x = self.maxpool_conv(x)
+        if self.patch_size > 1:
+            x = self.patch_down(x)
+            x = self.double_conv1(x)
+            x = self.double_conv2(x)
+        else:
+            x = self.maxpool_conv(x)
+
         emb = self.emb_layer(t_emb)[:, :, None, None].expand(-1, -1, x.shape[-2], x.shape[-1])
         return x + emb
 
 
-# Up-sampling block
+# Modify the Up class to use patch-based upsampling
 class Up(nn.Module):
-    def __init__(self, in_channels, out_channels, emb_dim=256):
+    def __init__(self, in_channels, out_channels, emb_dim=256, patch_size=1):
         super().__init__()
 
-        self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        self.patch_size = patch_size
+
+        # Use patch expansion if patch_size > 1, otherwise use bilinear upsampling
+        if patch_size > 1:
+            self.up = PatchExpand(in_channels // 2, in_channels // 2, patch_size=patch_size)
+        else:
+            self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+
+        # Convolutions using patch size
         self.conv = nn.Sequential(
             DoubleConv(in_channels, in_channels, residual=True),
             DoubleConv(in_channels, out_channels, in_channels // 2),
@@ -160,6 +267,8 @@ class Up(nn.Module):
 
         # Concatenate skip connections
         x = torch.cat([skip_x, x], dim=1)
+
+        # Apply convolutions
         x = self.conv(x)
 
         emb = self.emb_layer(t_emb)[:, :, None, None].expand(-1, -1, x.shape[-2], x.shape[-1])
@@ -255,33 +364,15 @@ class SelfAttention(nn.Module):
 
 # U-Net Model with time and class conditioning
 class CIFARUNetDenoiser(nn.Module):
-    """
-    U-Net architecture for image denoising with self-attention, designed for CIFAR-10 dataset.
-    The model incorporates time and class conditioning for use in diffusion models.
-
-    Features:
-    - Encoder-decoder architecture with skip connections
-    - Self-attention at multiple levels for global context
-    - Time and class conditioning throughout the network
-    - Residual refinement module for output enhancement
-
-    Args:
-        img_size (int): Size of input image (assumed square)
-        in_channels (int): Number of input channels (3 for RGB)
-        num_classes (int): Number of classes for conditioning
-        time_dim (int): Dimensionality of time embedding
-        attention_heads (int): Number of attention heads in self-attention layers
-        attention_head_dim (int): Dimension per attention head
-    """
-
     def __init__(self, img_size=32, in_channels=3, num_classes=2, time_dim=256,
-                 attention_heads=8, attention_head_dim=80):
+                 attention_heads=8, attention_head_dim=80, patch_size=4):
         super(CIFARUNetDenoiser, self).__init__()
 
         # Store important parameters
         self.img_size = img_size
         self.in_channels = in_channels
         self.time_dim = time_dim
+        self.patch_size = patch_size
 
         # Time embedding network: converts scalar timestep to time_dim vector
         self.time_mlp = nn.Sequential(
@@ -295,33 +386,33 @@ class CIFARUNetDenoiser(nn.Module):
         # Class embedding: learns a vector for each class label
         self.class_embedding = nn.Embedding(num_classes, time_dim)
 
-        # Initial convolutional layer
-        self.init_conv = DoubleConv(in_channels, 64)
+        # Initial convolutional layer (standard conv, not patch-based)
+        self.init_conv = DoubleConv(in_channels, 64, patch_size=1)
 
-        # Encoder (downsampling path)
-        self.down1 = Down(64, 128, emb_dim=time_dim)
+        # Encoder (downsampling path) with patch convolutions
+        self.down1 = Down(64, 128, emb_dim=time_dim, patch_size=patch_size)
         self.sa1 = SelfAttention(128, num_heads=attention_heads, head_dim=attention_head_dim)
-        self.down2 = Down(128, 256, emb_dim=time_dim)
+        self.down2 = Down(128, 256, emb_dim=time_dim, patch_size=patch_size)
         self.sa2 = SelfAttention(256, num_heads=attention_heads, head_dim=attention_head_dim)
-        self.down3 = Down(256, 256, emb_dim=time_dim)
+        self.down3 = Down(256, 256, emb_dim=time_dim, patch_size=patch_size)
         self.sa3 = SelfAttention(256, num_heads=attention_heads, head_dim=attention_head_dim)
 
-        # Bottleneck layers at the lowest resolution
-        self.bottleneck1 = DoubleConv(256, 512)
-        self.bottleneck2 = DoubleConv(512, 512)
-        self.bottleneck3 = DoubleConv(512, 256)
+        # Bottleneck layers at the lowest resolution (use standard convs)
+        self.bottleneck1 = DoubleConv(256, 512, patch_size=1)
+        self.bottleneck2 = DoubleConv(512, 512, patch_size=1)
+        self.bottleneck3 = DoubleConv(512, 256, patch_size=1)
 
-        # Decoder (upsampling path)
-        self.up1 = Up(512, 128, emb_dim=time_dim)  # Input: 256 (from bottleneck) + 256 (skip from down3)
+        # Decoder (upsampling path) with patch convolutions
+        self.up1 = Up(512, 128, emb_dim=time_dim, patch_size=patch_size)
         self.sa4 = SelfAttention(128, num_heads=attention_heads, head_dim=attention_head_dim)
-        self.up2 = Up(256, 64, emb_dim=time_dim)  # Input: 128 (from up1) + 128 (skip from down2)
+        self.up2 = Up(256, 64, emb_dim=time_dim, patch_size=patch_size)
         self.sa5 = SelfAttention(64, num_heads=attention_heads, head_dim=attention_head_dim)
-        self.up3 = Up(128, 64, emb_dim=time_dim)  # Input: 64 (from up2) + 64 (skip from down1)
+        self.up3 = Up(128, 64, emb_dim=time_dim, patch_size=patch_size)
         self.sa6 = SelfAttention(64, num_heads=attention_heads, head_dim=attention_head_dim)
 
-        # Final output convolution
+        # Final output convolution (standard conv)
         self.final_conv = nn.Sequential(
-            DoubleConv(64, 64),
+            DoubleConv(64, 64, patch_size=1),
             nn.Conv2d(64, in_channels, kernel_size=1)  # 1x1 conv to map to RGB
         )
 
@@ -357,6 +448,9 @@ class CIFARUNetDenoiser(nn.Module):
         Returns:
             torch.Tensor: Denoised output with same shape as input
         """
+        # Store original dimensions for ensuring output size matches input
+        orig_height, orig_width = x.shape[2], x.shape[3]
+
         # Process noise level - handle different formats
         batch_size = x.shape[0]
 
@@ -414,6 +508,10 @@ class CIFARUNetDenoiser(nn.Module):
         # Final convolution
         output = self.final_conv(x)  # [B, in_channels, H, W]
 
+        # Ensure output size matches input size using interpolation if needed
+        if output.shape[2] != orig_height or output.shape[3] != orig_width:
+            output = F.interpolate(output, size=(orig_height, orig_width), mode='bilinear', align_corners=True)
+
         # Apply refinement with residual connection
         refined_output = self.refinement(output) + output
 
@@ -445,7 +543,8 @@ if __name__ == '__main__':
         img_size=img_size,
         in_channels=3,
         num_classes=2,  # Cat and dog
-        time_dim=256
+        time_dim=256,
+        patch_size=4
     ).to(device)
 
     # Use AdamW with weight decay for better regularization
@@ -816,6 +915,10 @@ if __name__ == '__main__':
                                                   size='large', rotation=0,
                                                   labelpad=40, va='center', ha='right')
 
+        plt.suptitle("Detailed Denoising Process", fontsize=16)
+        plt.subplots_adjust(left=0.1, wspace=0.05, hspace=0.1)
+        plt.tight_layout()
+        plt.savefig('detailed_denoising_process.png', dpi=300, bbox_inches='tight')
         plt.suptitle("Detailed Denoising Process", fontsize=16)
         plt.subplots_adjust(left=0.1, wspace=0.05, hspace=0.1)
         plt.tight_layout()
