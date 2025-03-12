@@ -280,33 +280,22 @@ class SelfAttention(nn.Module):
     """
     Linear Attention module with O(n) complexity instead of O(n²)
     """
-
-    def __init__(self, channels, num_heads=4, head_dim=None):
+    def __init__(self, channels, num_heads=4):
         super(SelfAttention, self).__init__()
         self.channels = channels
         self.num_heads = num_heads
+        self.head_dim = channels // num_heads
 
-        # Use custom head_dim if provided, otherwise divide channels
-        if head_dim is not None:
-            self.head_dim = head_dim
-            self.inner_dim = head_dim * num_heads
-            # Need projections to handle dimension change
-            self.in_proj = nn.Conv2d(channels, self.inner_dim, kernel_size=1)
-            self.out_proj = nn.Conv2d(self.inner_dim, channels, kernel_size=1)
-        else:
-            self.head_dim = channels // num_heads
-            self.inner_dim = channels
-            # No dimension change needed
-            self.in_proj = nn.Identity()
-            self.out_proj = nn.Conv2d(channels, channels, kernel_size=1)
-
-        # Projection layers for Q, K, V
-        self.query = nn.Conv2d(self.inner_dim, self.inner_dim, kernel_size=1)
-        self.key = nn.Conv2d(self.inner_dim, self.inner_dim, kernel_size=1)
-        self.value = nn.Conv2d(self.inner_dim, self.inner_dim, kernel_size=1)
+        # Projection layers
+        self.query = nn.Conv2d(channels, channels, kernel_size=1)
+        self.key = nn.Conv2d(channels, channels, kernel_size=1)
+        self.value = nn.Conv2d(channels, channels, kernel_size=1)
+        self.out_proj = nn.Conv2d(channels, channels, kernel_size=1)
 
         # Normalization layers
-        self.norm = nn.GroupNorm(1, self.inner_dim)
+        self.norm_q = nn.GroupNorm(1, channels)
+        self.norm_k = nn.GroupNorm(1, channels)
+        self.norm_v = nn.GroupNorm(1, channels)
 
         # For storing attention maps
         self.attention_maps = None
@@ -317,14 +306,10 @@ class SelfAttention(nn.Module):
         """
         batch_size, c, h, w = x.shape
 
-        # Initial projection if dimensions differ
-        x = self.in_proj(x)
-        x = self.norm(x)
-
         # Apply projections
-        q = self.query(x)
-        k = self.key(x)
-        v = self.value(x)
+        q = self.query(self.norm_q(x))
+        k = self.key(self.norm_k(x))
+        v = self.value(self.norm_v(x))
 
         # Reshape to multi-head format
         q = q.view(batch_size, self.num_heads, self.head_dim, h * w)
@@ -335,7 +320,8 @@ class SelfAttention(nn.Module):
         q = F.elu(q) + 1.0
         k = F.elu(k) + 1.0
 
-        # Linear attention computation
+        # Linear attention computation (avoiding the explicit attention matrix)
+        # First normalize keys along sequence dimension for stability
         k_sum = k.sum(dim=-1, keepdim=True).clamp(min=1e-5)
         k_normalized = k / k_sum
 
@@ -346,9 +332,9 @@ class SelfAttention(nn.Module):
         out = torch.matmul(context, q)
 
         # Reshape back to original format
-        out = out.view(batch_size, self.inner_dim, h, w)
+        out = out.view(batch_size, c, h, w)
 
-        # Final projection back to original dimensions if needed
+        # Final projection
         out = self.out_proj(out)
 
         return out
@@ -382,11 +368,11 @@ class CIFARUNetDenoiser(nn.Module):
 
         # Encoder (downsampling path) with patch convolutions
         self.down1 = Down(64, 128, emb_dim=time_dim, patch_size=patch_size)
-        self.sa1 = SelfAttention(128, num_heads=attention_heads, head_dim=attention_head_dim)
+        self.sa1 = SelfAttention(128, num_heads=attention_heads)
         self.down2 = Down(128, 256, emb_dim=time_dim, patch_size=patch_size)
-        self.sa2 = SelfAttention(256, num_heads=attention_heads, head_dim=attention_head_dim)
+        self.sa2 = SelfAttention(256, num_heads=attention_heads)
         self.down3 = Down(256, 256, emb_dim=time_dim, patch_size=patch_size)
-        self.sa3 = SelfAttention(256, num_heads=attention_heads, head_dim=attention_head_dim)
+        self.sa3 = SelfAttention(256, num_heads=attention_heads)
 
         # Bottleneck layers at the lowest resolution (use standard convs)
         self.bottleneck1 = DoubleConv(256, 512, patch_size=1)
@@ -395,11 +381,11 @@ class CIFARUNetDenoiser(nn.Module):
 
         # Decoder (upsampling path) with patch convolutions
         self.up1 = Up(512, 128, emb_dim=time_dim, patch_size=patch_size)
-        self.sa4 = SelfAttention(128, num_heads=attention_heads, head_dim=attention_head_dim)
+        self.sa4 = SelfAttention(128, num_heads=attention_heads)
         self.up2 = Up(256, 64, emb_dim=time_dim, patch_size=patch_size)
-        self.sa5 = SelfAttention(64, num_heads=attention_heads, head_dim=attention_head_dim)
+        self.sa5 = SelfAttention(64, num_heads=attention_heads)
         self.up3 = Up(128, 64, emb_dim=time_dim, patch_size=patch_size)
-        self.sa6 = SelfAttention(64, num_heads=attention_heads, head_dim=attention_head_dim)
+        self.sa6 = SelfAttention(64, num_heads=attention_heads)
 
         # Final output convolution (standard conv)
         self.final_conv = nn.Sequential(
@@ -535,8 +521,7 @@ if __name__ == '__main__':
         in_channels=3,
         num_classes=2,  # Cat and dog
         time_dim=256,
-        patch_size=4,
-        attention_head_dim=512
+        patch_size=4
     ).to(device)
 
     # Use AdamW with weight decay for better regularization
