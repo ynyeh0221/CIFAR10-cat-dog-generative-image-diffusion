@@ -60,7 +60,7 @@ python train.py
 ## Visualization
 
 Visualizations for each epoch and the generation process will be saved in the `epoch_visualizations` folder.
-
+![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v5/output/epoch_1_generation.png)
 ![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v5/output/epoch_10_generation.png)
 ![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v5/output/epoch_20_generation.png)
 ![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v5/output/epoch_30_generation.png)
