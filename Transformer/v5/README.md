@@ -57,6 +57,17 @@ Run the training script to train the model:
 python train.py
 ```
 
+![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v5/output/epoch_10_generation.png)
+![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v5/output/epoch_20_generation.png)
+![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v5/output/epoch_30_generation.png)
+![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v5/output/epoch_40_generation.png)
+![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v5/output/epoch_50_generation.png)
+![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v5/output/epoch_60_generation.png)
+![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v5/output/epoch_70_generation.png)
+![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v5/output/epoch_80_generation.png)
+![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v5/output/epoch_90_generation.png)
+![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v5/output/epoch_100_generation.png)
+
 Visualizations of training progress and generated samples will be saved in `epoch_visualizations/`.
 
 ## Visualization
