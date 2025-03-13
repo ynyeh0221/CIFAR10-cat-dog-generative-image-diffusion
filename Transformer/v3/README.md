@@ -94,3 +94,7 @@ The loss function adaptively balances:
 ## Results
 
 The model generates high-quality 32x32 cat and dog images. Example visualizations are saved during training showing the progressive denoising process and final generated samples.
+
+![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v3/output/myplot1.png)
+![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v3/output/myplot2.png)
+![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v3/output/myplot3.png)
