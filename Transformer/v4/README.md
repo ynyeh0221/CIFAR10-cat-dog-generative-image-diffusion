@@ -41,3 +41,7 @@ python your_script.py --mode generate --model_path path_to_checkpoint.pt --num_s
 ## Results
 - Checkpoints are automatically saved during training.
 - Generated images and training visualizations are stored in designated directories for easy access and evaluation.
+
+![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v4/output/myplot1.png)
+![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v4/output/myplot2.png)
+![](https://github.com/ynyeh0221/CIFAR10-cat-dog-generative-diffusion/blob/main/Transformer/v4/output/myplot3.png)
