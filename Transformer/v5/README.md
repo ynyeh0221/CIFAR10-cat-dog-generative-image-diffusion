@@ -8,7 +8,7 @@ This project implements a diffusion-based denoising model specifically designed 
 
 - **Dataset Filtering:** Utilizes CIFAR-10 dataset, filtering specifically for cat and dog classes.
 - **Patch-based Convolutions:** Custom convolutional modules (`PatchConv` and `PatchExpand`) for enhanced local context handling.
-- **Self-Attention:** Incorporates efficient linear self-attention mechanisms.
+- **Linear-Attention:** Incorporates efficient linear self-attention mechanisms.
 - **U-Net Architecture:** A modified U-Net architecture with time and class conditioning, suitable for diffusion-based image generation tasks.
 - **Custom Training Loop:** Includes a diffusion-based denoising training loop with combined loss functions (MSE, L1, and Cosine Similarity).
 
